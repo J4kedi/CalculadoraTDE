@@ -3,33 +3,169 @@ trigger:
     include:
       - main
 
-pool:
-  vmImage: 'ubuntu-latest'
+pr:
+  branches:
+    include:
+      - main
 
-steps:
-- task: Bash@3
-  displayName: "Listar arquivos do projeto"
-  inputs:
-    targetType: 'inline'
-    script: |
-      echo "Arquivos presentes no repositório:"
-      ls -R
+parameters:
+  - name: forceDeploy
+    displayName: "Build Docker image and deploy"
+    type: boolean
+    default: false
 
-- task: Bash@3
-  displayName: "Validar estrutura do projeto"
-  inputs:
-    targetType: 'inline'
-    script: |
-      if [ -f "index.html" ] && [ -f "style.css" ] && [ -f "script.js" ]; then
-        echo "Estrutura OK"
-      else
-        echo "Erro: Arquivos essenciais não encontrados"
-        exit 1
-      fi
+variables:
+  nodeVersion: "20.x"
+  dockerHubServiceConnection: "DockerHub"
+  dockerHubRepository: "$(DOCKERHUB_REPOSITORY)"
+  forceDeployRequested: ${{ parameters.forceDeploy }}
 
-- task: Bash@3
-  displayName: "Simular build (projeto estático)"
-  inputs:
-    targetType: 'inline'
-    script: |
-      echo "Build concluído (projeto HTML/CSS/JS não requer compilação)"
+stages:
+  - stage: Quality
+    displayName: "Static analysis and tests"
+    jobs:
+      - job: StaticAnalysisAndTests
+        displayName: "Run lint, unit tests and SonarCloud"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: NodeTool@0
+            displayName: "Install Node.js"
+            inputs:
+              versionSpec: "$(nodeVersion)"
+
+          - script: npm ci
+            displayName: "Install dependencies"
+
+          - task: SonarCloudPrepare@4
+            displayName: "Prepare SonarCloud analysis"
+            inputs:
+              SonarCloud: "SonarCloud"
+              organization: "$(SONAR_ORGANIZATION)"
+              scannerMode: "cli"
+              configMode: "manual"
+              cliProjectKey: "$(SONAR_PROJECT_KEY)"
+              cliProjectName: "$(SONAR_PROJECT_NAME)"
+              cliSources: "."
+              extraProperties: |
+                sonar.sources=.
+                sonar.exclusions=node_modules/**,coverage/**,dist/**,test-results/**,tests/**,*.config.js
+                sonar.coverage.exclusions=script.js,scripts/**
+                sonar.tests=tests
+                sonar.test.inclusions=tests/**/*.test.js
+                sonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+          - script: npm run lint
+            displayName: "Run ESLint"
+
+          - script: npm run test:ci
+            displayName: "Run unit tests with coverage"
+
+          - task: PublishTestResults@2
+            displayName: "Publish unit test results"
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "test-results/junit.xml"
+              failTaskOnFailedTests: true
+
+          - task: PublishCodeCoverageResults@2
+            displayName: "Publish code coverage"
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: "$(System.DefaultWorkingDirectory)/coverage/cobertura-coverage.xml"
+              failIfCoverageEmpty: true
+
+          - task: SonarCloudAnalyze@4
+            displayName: "Run SonarCloud analysis"
+            inputs:
+              jdkversion: "JAVA_HOME_17_X64"
+
+          - task: SonarCloudPublish@4
+            displayName: "Publish SonarCloud quality gate"
+            inputs:
+              pollingTimeoutSec: "300"
+
+          - script: npm run build
+            displayName: "Build static artifact"
+
+          - publish: dist
+            displayName: "Publish static artifact"
+            artifact: static-site
+
+  - stage: DockerImage
+    displayName: "Build and push Docker Hub image"
+    dependsOn: Quality
+    condition: >
+      and(
+        succeeded(),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        or(
+          eq(variables['RUN_SOURCE'], 'azure_boards_done'),
+          eq(variables['forceDeployRequested'], 'true'),
+          eq(variables['forceDeployRequested'], 'True')
+        )
+      )
+    jobs:
+      - job: BuildAndPush
+        displayName: "Build and push Docker image"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: self
+
+          - script: |
+              echo "##vso[task.setvariable variable=imageTag]${BUILD_SOURCEVERSION:0:7}"
+            displayName: "Create short image tag"
+
+          - task: Docker@2
+            displayName: "Build and push image to Docker Hub"
+            inputs:
+              command: "buildAndPush"
+              containerRegistry: "$(dockerHubServiceConnection)"
+              repository: "$(dockerHubRepository)"
+              Dockerfile: "Dockerfile"
+              buildContext: "$(Build.SourcesDirectory)"
+              tags: |
+                $(Build.BuildId)
+                $(imageTag)
+                latest
+
+  - stage: DeployStaticWebApp
+    displayName: "Deploy Azure Static Web App"
+    dependsOn: DockerImage
+    condition: >
+      and(
+        succeeded(),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        or(
+          eq(variables['RUN_SOURCE'], 'azure_boards_done'),
+          eq(variables['forceDeployRequested'], 'true'),
+          eq(variables['forceDeployRequested'], 'True')
+        )
+      )
+    jobs:
+      - deployment: Deploy
+        displayName: "Deploy static site"
+        environment: "production"
+        pool:
+          vmImage: "ubuntu-latest"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: static-site
+
+                - task: AzureStaticWebApp@0
+                  displayName: "Deploy to Azure Static Web Apps"
+                  inputs:
+                    workingDirectory: "$(Pipeline.Workspace)"
+                    app_location: "static-site"
+                    output_location: ""
+                    skip_app_build: true
+                    skip_api_build: true
+                    azure_static_web_apps_api_token: "$(AZURE_STATIC_WEB_APPS_API_TOKEN)"
