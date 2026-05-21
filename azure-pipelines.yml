@@ -57,6 +57,7 @@ stages:
                 sonar.tests=tests
                 sonar.test.inclusions=tests/**/*.test.js
                 sonar.javascript.lcov.reportPaths=coverage/lcov.info
+                sonar.architecture.enable=false
 
           - script: npm run lint
             displayName: "Run ESLint"
