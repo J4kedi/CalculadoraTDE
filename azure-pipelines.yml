@@ -99,16 +99,7 @@ stages:
   - stage: DockerImage
     displayName: "Build and push Docker Hub image"
     dependsOn: Quality
-    condition: >
-      and(
-        succeeded(),
-        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
-        or(
-          eq(variables['RUN_SOURCE'], 'azure_boards_done'),
-          eq(variables['forceDeployRequested'], 'true'),
-          eq(variables['forceDeployRequested'], 'True')
-        )
-      )
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - job: BuildAndPush
         displayName: "Build and push Docker image"
@@ -137,16 +128,7 @@ stages:
   - stage: DeployStaticWebApp
     displayName: "Deploy Azure Static Web App"
     dependsOn: DockerImage
-    condition: >
-      and(
-        succeeded(),
-        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
-        or(
-          eq(variables['RUN_SOURCE'], 'azure_boards_done'),
-          eq(variables['forceDeployRequested'], 'true'),
-          eq(variables['forceDeployRequested'], 'True')
-        )
-      )
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - deployment: Deploy
         displayName: "Deploy static site"
